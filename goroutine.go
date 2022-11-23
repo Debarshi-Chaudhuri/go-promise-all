@@ -1,13 +1,26 @@
 package util
 
 import (
+	"context"
 	"errors"
 	"math"
 	"net/http"
+	"reflect"
 	"sync"
 	"sync/atomic"
 )
 
+type Promise struct {
+	Function any
+	Args     []interface{}
+}
+
+func Promisify[FuncType any](promFunc FuncType, args ...interface{}) Promise {
+	return Promise{
+		Function: promFunc,
+		Args:     args,
+	}
+}
 
 func PromiseAllLimiter[T any, R any](data []T, target func(T) R, limit int) ([]R, error) {
 	Assert(limit < len(data), "UNKNOWN", http.StatusInternalServerError, "Limit is invalid!")
@@ -110,3 +123,52 @@ func errorHandler(goroutineError *atomic.Value, stopCh *chan bool, wg *sync.Wait
 	wg.Done()
 }
 
+
+func PromiseAllExtended(ctx *context.Context, promises ...Promise) ([]interface{}, error) {
+	var goroutineError atomic.Value
+	var responseMap SyncMap
+	var wg sync.WaitGroup
+
+	dataLength := len(promises)
+	wg.Add(dataLength)
+
+	stopCh := make(chan bool)
+	for i, promise := range promises {
+		newCtx := *ctx
+		go func(ctx *context.Context, index int, targetProm Promise) {
+			defer errorHandler(&goroutineError, &stopCh, &wg)
+
+			fnType := reflect.TypeOf(targetProm.Function)
+			if fnType.Kind() != reflect.Func {
+				Assert(false, "UNKNOWN", http.StatusBadRequest, "given type is not a fucntion")
+			}
+
+			fn := reflect.ValueOf(targetProm.Function)
+			arguments := []reflect.Value{}
+			arguments = append(arguments, reflect.ValueOf(ctx))
+			for _, arg := range targetProm.Args {
+				arguments = append(arguments, reflect.ValueOf(arg))
+			}
+
+			response := fn.Call(arguments)
+
+			responseValue := response[0]
+
+			if reflect.TypeOf(responseValue).Kind() == reflect.Pointer {
+				responseMap.Store(index, response[0].Addr().Elem().Interface())
+			} else {
+				responseMap.Store(index, response[0].Elem().Interface())
+			}
+		}(&newCtx, i, promise)
+	}
+
+	waitForCompletion(&wg, stopCh)
+
+	goroutineErrorValue := goroutineError.Load()
+	if goroutineErrorValue == nil {
+		targetResponse := orderedResponse[interface{}](&responseMap)
+		return targetResponse, nil
+	} else {
+		return nil, errors.New(goroutineErrorValue.(string))
+	}
+}
