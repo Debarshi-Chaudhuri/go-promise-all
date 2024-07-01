@@ -1,3 +1,3 @@
-module example.com/greetings
+module github.com/Debarshi-Chaudhuri/go-promise-all
 
 go 1.19
